@@ -1,0 +1,136 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed only to attach the APK to a GitHub Release on tags
+
+env:
+  GODOT_VERSION: "4.3"
+  GODOT_RELEASE: "4.3-stable"
+  APK_NAME: Detective-Mohammad-Taha.apk
+  HAS_RELEASE: ${{ secrets.RELEASE_KEYSTORE_B64 != '' && 'true' || 'false' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate game data (cases, references, no dead ends)
+        run: python3 tools/validate_data.py
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platform-tools" "build-tools;34.0.0" "platforms;android-34" "cmdline-tools;latest"
+
+      - name: Download Vazirmatn font (SIL OFL 1.1)
+        run: |
+          mkdir -p assets/fonts
+          F=assets/fonts/Vazirmatn-Regular.ttf
+          for url in \
+            "https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/ttf/Vazirmatn-Regular.ttf" \
+            "https://github.com/rastikerdar/vazirmatn/raw/v33.003/fonts/ttf/Vazirmatn-Regular.ttf"; do
+            curl -fL --retry 3 -o "$F" "$url" && break || true
+          done
+          if [ ! -s "$F" ]; then
+            echo "::warning::Vazirmatn could not be downloaded; the game will use the device's Arabic-capable system font."
+            rm -f "$F"
+          fi
+
+      - name: Install Godot ${{ env.GODOT_VERSION }} and export templates
+        run: |
+          base="https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}"
+          curl -fL --retry 3 -o godot.zip "$base/Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          curl -fL --retry 3 -o templates.tpz "$base/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          unzip -q godot.zip
+          sudo mv "Godot_v${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
+          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          unzip -q templates.tpz -d tpl
+          mv tpl/templates/* "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/"
+          godot --version
+
+      - name: Create debug keystore and Godot editor settings
+        run: |
+          keytool -genkeypair -v -keystore "$HOME/debug.keystore" -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
+          mkdir -p "$HOME/.config/godot"
+          cat > "$HOME/.config/godot/editor_settings-${GODOT_VERSION}.tres" <<EOT
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "${ANDROID_HOME}"
+          export/android/java_sdk_path = "${JAVA_HOME}"
+          export/android/debug_keystore = "$HOME/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOT
+
+      - name: Import project resources
+        run: |
+          timeout 300 godot --headless --path . --import || true
+          timeout 300 godot --headless --path . --import || true
+
+      - name: Check GDScript for parse errors
+        run: |
+          status=0
+          for f in scripts/*.gd; do
+            echo "== $f"
+            godot --headless --path . --check-only --script "res://$f" || { echo "::error file=$f::GDScript check failed"; status=1; }
+          done
+          exit $status
+
+      - name: Build APK (debug-signed test build)
+        if: env.HAS_RELEASE != 'true'
+        run: |
+          mkdir -p build
+          godot --headless --path . --export-debug "Android" "build/${APK_NAME}" 2>&1 | tee build/export.log
+          test -s "build/${APK_NAME}" || { echo "::error::APK was not produced"; exit 1; }
+
+      - name: Build APK (release-signed, only when secrets are configured)
+        if: env.HAS_RELEASE == 'true'
+        env:
+          RELEASE_KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
+          GODOT_ANDROID_KEYSTORE_RELEASE_USER: ${{ secrets.RELEASE_KEY_ALIAS }}
+          GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+        run: |
+          mkdir -p build
+          echo "$RELEASE_KEYSTORE_B64" | base64 -d > "$HOME/release.keystore"
+          export GODOT_ANDROID_KEYSTORE_RELEASE_PATH="$HOME/release.keystore"
+          godot --headless --path . --export-release "Android" "build/${APK_NAME}" 2>&1 | tee build/export.log
+          test -s "build/${APK_NAME}" || { echo "::error::Release APK was not produced"; exit 1; }
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Detective-Mohammad-Taha-APK
+          path: build/${{ env.APK_NAME }}
+          if-no-files-found: error
+
+      - name: Upload export log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: export-log
+          path: build/export.log
+          if-no-files-found: ignore
+
+      - name: Publish GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/${{ env.APK_NAME }}
