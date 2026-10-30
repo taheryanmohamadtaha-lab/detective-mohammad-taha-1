@@ -30,12 +30,16 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
+      - name: Install Android SDK packages (runner already ships an SDK)
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install "platform-tools" "build-tools;34.0.0" "platforms;android-34" "cmdline-tools;latest"
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          ls "$ANDROID_HOME/cmdline-tools" || true
+          set +o pipefail
+          yes | "$SDKM" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
+          set -o pipefail
+          "$SDKM" --sdk_root="$ANDROID_HOME" --install "platform-tools" "build-tools;34.0.0" "platforms;android-34"
 
       - name: Download Vazirmatn font (SIL OFL 1.1)
         run: |
@@ -123,14 +127,4 @@ jobs:
 
       - name: Upload export log
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: export-log
-          path: build/export.log
-          if-no-files-found: ignore
-
-      - name: Publish GitHub Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: build/${{ env.APK_NAME }}
+        uses: actions/upload-artifact@v
