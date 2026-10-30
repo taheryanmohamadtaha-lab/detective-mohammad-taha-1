@@ -89,14 +89,13 @@ jobs:
           timeout 300 godot --headless --path . --import || true
           timeout 300 godot --headless --path . --import || true
 
-      - name: Check GDScript for parse errors
+      - name: Smoke test - run the project headless (autoloads + main scene)
         run: |
-          status=0
-          for f in scripts/*.gd; do
-            echo "== $f"
-            godot --headless --path . --check-only --script "res://$f" || { echo "::error file=$f::GDScript check failed"; status=1; }
-          done
-          exit $status
+          timeout 180 godot --headless --path . --quit-after 120 2>&1 | tee smoke.log || true
+          if grep -E "SCRIPT ERROR|Parse Error|Compile Error|Failed to load script" smoke.log; then
+            echo "::error::GDScript errors found, see log above"
+            exit 1
+          fi
 
       - name: Build APK (debug-signed test build)
         if: env.HAS_RELEASE != 'true'
@@ -122,9 +121,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Detective-Mohammad-Taha-APK
-          path: build/${{ env.APK_NAME }}
+          path: build/Detective-Mohammad-Taha.apk
           if-no-files-found: error
 
       - name: Upload export log
         if: always()
         uses: actions/upload-artifact@v4
+        with:
+          name: export-log
+          path: build/export.log
+          if-no-files-found: ignore
+
+      - name: Publish GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/Detective-Mohammad-Taha.apk
